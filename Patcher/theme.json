@@ -1,0 +1,67 @@
+{
+  "title": "Violet2",
+  "tagline": "Svět plný soubojů, spojenců a odměn čeká. Přidej se a stoupej k vrcholu!",
+  "font": "Tektur",
+  "effects": true,
+  "bg": "#05122a",
+  "text": "#e1f1ff",
+  "muted": "#8fc4e0",
+  "accent": "#2ee6c0",
+  "accent2": "#7fe3ff",
+  "title_text": "#cfe9ff",
+  "tagline_text": "#bfe3ff",
+  "panel_title": "#7fe3ff",
+  "panel_text": "#e1f1ff",
+  "event_text": "#ffd98a",
+  "bar_outline": "#2f7fa6",
+  "bar_bg": "#05122a",
+  "bar_file": "#46b8ff",
+  "icon": "assets/icon.ico",
+  "background": "assets/ui_bg.png",
+  "panels": "",
+  "logo": "",
+  "buttons": {
+    "play": {
+      "text": "HRÁT",
+      "image": "assets/btn_play.png"
+    },
+    "settings": {
+      "text": "Nastavení",
+      "image": "assets/btn_settings.png"
+    },
+    "web": {
+      "text": "Web",
+      "image": "assets/btn_web.png"
+    },
+    "support": {
+      "text": "Podpora",
+      "image": "assets/btn_support.png"
+    },
+    "facebook": {
+      "text": "Facebook",
+      "image": "assets/btn_facebook.png"
+    },
+    "discord": {
+      "text": "Discord",
+      "image": "assets/btn_discord.png"
+    },
+    "check": {
+      "text": "Kontrola",
+      "image": "assets/btn_check.png"
+    },
+    "register": {
+      "text": "Registrace",
+      "image": "assets/btn_register.png"
+    }
+  },
+  "title_btn": "#07162b",
+  "note_bg": "#0c1d33",
+  "font_bold": "Tektur Medium",
+  "panel": "#081a32",
+  "border": "#2f7fa6",
+  "ok": "#2ecc71",
+  "bad": "#e5484d",
+  "field": "#05122a",
+  "rail_on": "#0f3550",
+  "play_text": "#04202a"
+}

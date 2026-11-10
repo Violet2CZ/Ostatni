@@ -1,0 +1,19 @@
+{
+  "site_url": "https://violet2.cz",
+  "patch_url": "https://violet2.cz/patcher",
+  "public_key": "0cd2f402e26296f919c4a23a35b5b22dc09575b5c1497063c26552f69dd387f4",
+  "game_dir": "",
+  "game_exe": "client.bin",
+  "config_exe": "config.exe",
+  "channels": 4,
+  "close_on_play": true,
+  "links": {
+    "web": "https://violet2.cz",
+    "discord": "https://discord.com/invite/UageEX3Cyd",
+    "facebook": "https://www.facebook.com/violet2mt",
+    "support": "https://violet2.cz/index.php?p=kontakt",
+    "register": "https://violet2.cz/index.php?p=register",
+    "forgot": "https://violet2.cz/index.php?p=forgot",
+    "ranking": "https://violet2.cz/index.php?p=ranking"
+  }
+}

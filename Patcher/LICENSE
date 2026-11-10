@@ -1,0 +1,12 @@
+Violet2 Launcher
+
+1) Zdrojový kód (violet2_launcher.py, v2sig.py, tools/*) je pod licencí MIT:
+   Copyright (c) Violet2
+   Povolení k použití, kopírování, úpravám a šíření je uděleno zdarma, za podmínky zachování
+   tohoto oznámení. SOFTWARE JE POSKYTOVÁN „TAK JAK JE", BEZ ZÁRUKY JAKÉHOKOLI DRUHU.
+
+2) Název „Violet2", logo, ikony a grafika ve složce assets/ jsou majetkem provozovatele serveru Violet2
+   a nejsou součástí licence MIT. Bez písemného souhlasu je nelze používat pro jiný server
+   ani pro zavádějící účely (například vydávání cizího launcheru za Violet2).
+
+3) Metin2 je ochranná známka svého majitele. Tento projekt je nezávislý, není s ním nijak spojen a nepoužívá jeho grafiku.
