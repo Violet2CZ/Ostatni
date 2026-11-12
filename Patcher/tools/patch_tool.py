@@ -14,6 +14,8 @@ sys.path.insert(0, ROOT)
 import v2sig  # noqa: E402
 
 KEY = os.path.join(ROOT, "keys", "private.key")
+# Soubory vzniklé na počítači hráče (uložené účty, předání přihlášení): nikdy se nenahrávají na server.
+PRIVATE = {"config/v2_accounts.dat", "config/v2_autologin.dat", "config/launcher_state.json"}
 REL = re.compile(r"^[A-Za-z0-9._\- ]+(?:/[A-Za-z0-9._\- ]+)*$")
 
 
@@ -54,11 +56,15 @@ def build(src, out):
         r = rel.lower()
         return any(r.startswith(k) if k.endswith("/") else fnmatch.fnmatch(r, k) for k in keep)
 
+    skipped = []
     for root, _, names in os.walk(src):
         for n in names:
             full = os.path.join(root, n)
             rel = os.path.relpath(full, src).replace("\\", "/")
             if rel == "_neprepisovat.txt":
+                continue
+            if rel.lower() in PRIVATE:
+                print("Preskakuji (osobni soubor hrace, do patche nepatri):", rel)
                 continue
             lr = rel.lower()
             if lr.startswith("log/") or lr.endswith(".log") or lr.rsplit("/", 1)[-1].startswith("syserr") or lr.endswith(".part"):
@@ -76,8 +82,13 @@ def build(src, out):
             if rel == "_odstranit.txt":
                 remove = [l.strip() for l in open(full, encoding="utf-8") if l.strip() and not l.startswith("#")]
                 continue
-            if not REL.match(rel) or ".." in rel.split("/") or rel.lower().endswith((".php", ".phtml", ".phar")):
-                sys.exit("Nepovolený název souboru: " + rel)
+            if ".." in rel.split("/") or rel.lower().endswith((".php", ".phtml", ".phar")):
+                sys.exit("Nepovolený soubor: " + rel)
+            if not REL.match(rel):
+                # původní klient obsahuje soubory s korejskými názvy (v Průzkumníku vypadají jako změť znaků);
+                # patcher je z bezpečnostních důvodů nepřenáší, hráči je mají z kompletního klienta
+                skipped.append(rel)
+                continue
             h = hashlib.sha256()
             with open(full, "rb") as f:
                 for c in iter(lambda: f.read(1 << 20), b""):
@@ -89,6 +100,12 @@ def build(src, out):
             if is_kept(rel):
                 item["keep"] = True
             files.append(item)
+    if skipped:
+        print("PŘESKOČENO %d souborů s nepodporovaným názvem (jen písmena bez diakritiky, čísla, . _ - mezera):" % len(skipped))
+        for r in skipped[:15]:
+            print("   ", r)
+        if len(skipped) > 15:
+            print("    ... a dalších %d" % (len(skipped) - 15))
     for r in remove:
         if not REL.match(r) or ".." in r.split("/"):
             sys.exit("Nepovolená cesta v _odstranit.txt: " + r)

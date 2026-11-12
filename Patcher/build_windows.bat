@@ -19,8 +19,8 @@ echo.
 %PY% -c "import tkinter" >nul 2>nul
 if errorlevel 1 goto notk
 
-echo [1/3] Instaluji/aktualizuji PyInstaller...
-%PY% -m pip install --upgrade pyinstaller
+echo [1/3] Instaluji/aktualizuji PyInstaller a Pillow (fotky novinek)...
+%PY% -m pip install --upgrade pyinstaller pillow
 echo.
 
 if not exist assets\icon.ico goto noicon

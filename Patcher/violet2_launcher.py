@@ -2,9 +2,11 @@
 """Violet2 Launcher a patcher (open source, MIT pro kód; název, logo a grafika Violet2 viz LICENSE).
 Jen standardní knihovna Pythonu 3.9+ (Tkinter). Žádná IP adresa ani heslo v launcheru není:
 stav serveru a počty hráčů dodává web přes HTTPS, patche jsou podepsané (Ed25519)."""
+import base64
 import encodings.idna  # noqa: F401  (musí být zabalený v exe, jinak spojení s webem selže: unknown encoding idna)
 import fnmatch
 import hashlib
+import io
 import json
 import math
 import os
@@ -27,7 +29,13 @@ import v2accounts
 import v2cfg
 import v2sig
 
-VERSION = "2.0.6"
+try:  # volitelné: s Pillow launcher ukáže fotky novinek z webu, bez něj použije pevné obrázky
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = 40_000_000
+except Exception:  # noqa: BLE001
+    Image = None
+
+VERSION = "2.0.12"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 # Vlastní data launcheru (stav, hudba, logy) NEJSOU ve složce hry, ale v %APPDATA%\\Violet2Launcher
 DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Violet2Launcher")
@@ -147,6 +155,41 @@ def fetch_small(url):
     if len(data) > MAX_JSON:
         raise ValueError("Odpověď je příliš velká")
     return data
+
+
+MAX_IMG = 8 * 1024 * 1024
+HERO_W, HERO_H = 758, 358
+
+
+def fetch_bytes(url, limit=MAX_IMG):
+    with fetch(url, timeout=20) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("Obrázek je příliš velký")
+    return data
+
+
+def news_png_b64(raw):
+    """Fotka novinky na PNG 758×358 (ořez na střed) s tmavým přechodem dole, aby šel číst text. Vrací base64, nebo None bez Pillow."""
+    if Image is None:
+        return None
+    im = Image.open(io.BytesIO(raw))
+    try:
+        im.draft("RGB", (HERO_W * 2, HERO_H * 2))
+    except Exception:  # noqa: BLE001
+        pass
+    im = im.convert("RGB")
+    k = max(HERO_W / im.width, HERO_H / im.height)
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    im = im.resize((max(HERO_W, round(im.width * k)), max(HERO_H, round(im.height * k))), resample)
+    left, top = (im.width - HERO_W) // 2, (im.height - HERO_H) // 2
+    im = im.crop((left, top, left + HERO_W, top + HERO_H))
+    gh = int(HERO_H * 0.72)
+    mask = Image.linear_gradient("L").resize((HERO_W, gh)).point(lambda v: int(v * 0.93))
+    im.paste(Image.new("RGB", (HERO_W, gh), (5, 18, 38)), (0, HERO_H - gh), mask)
+    out = io.BytesIO()
+    im.save(out, "PNG")
+    return base64.b64encode(out.getvalue()).decode("ascii")
 
 
 def log_exc():
@@ -475,11 +518,11 @@ def check_and_patch(cb):
     todo = []
     for item in man.get("files", []):
         lp = item["path"].lower()
-        if lp.startswith("log/") or lp.endswith(".log") or lp.rsplit("/", 1)[-1].startswith("syserr"):
-            continue  # logy hry se nikdy nestahují (vznikají na počítači hráče)
+        if lp.startswith("log/") or lp.endswith(".log") or lp.rsplit("/", 1)[-1].startswith("syserr") or lp in ("config/v2_accounts.dat", "config/v2_autologin.dat"):
+            continue  # logy hry a osobní soubory hráče (uložené účty) se nikdy nestahují
         dest = safe_rel(item["path"])
-        if item.get("keep") and os.path.isfile(dest):
-            continue  # soubor označený "nepřepisovat" (např. config.exe a jeho nastavení): stáhne se jen, když ve hře chybí
+        if (item.get("keep") or is_kept(item["path"], keep)) and os.path.isfile(dest):
+            continue  # nastavení hráče (config/*, metin2.cfg...) se nikdy nepřepisuje: stáhne se jen, když ve hře chybí
         if not os.path.isfile(dest) or os.path.getsize(dest) != int(item["size"]) or sha256_file(dest) != item["sha256"].lower():
             todo.append((item, dest))
     if not todo:
@@ -495,7 +538,13 @@ def check_and_patch(cb):
         h = hashlib.sha256()
         got = 0
         url = PATCH + "/files/" + urllib.parse.quote(item["path"])
-        with fetch(url, 60) as r, open(tmp, "wb") as out:
+        try:
+            resp = fetch(url, 60)
+        except RuntimeError as ex:
+            if (item.get("keep") or is_kept(item["path"], keep)) and "HTTP 404" in str(ex):
+                continue  # soubor "nepřepisovat" (nastavení hráče) chybí na serveru: není důvod kvůli němu zastavit celou aktualizaci
+            raise
+        with resp as r, open(tmp, "wb") as out:
             while True:
                 b = r.read(1 << 16)
                 if not b:
@@ -606,7 +655,7 @@ class App(tk.Tk):
                     if dt > 0.08:
                         self.perf_log("%s %d ms" % (name, dt * 1000))
             setattr(self, name, w)
-        for n in ("rail_enter", "rail_leave", "show_info", "show_hero", "draw_cards", "draw_accounts", "fx_set", "show_gms", "show_event", "toggle_mode", "apply_mode"):
+        for n in ("rail_enter", "rail_leave", "show_info", "show_hero", "set_top", "draw_top", "draw_online", "draw_accounts", "fx_set", "show_gms", "show_event", "toggle_mode", "apply_mode"):
             wrap(n)
         if self.hover_level < 4:
             orig_cf = self.c.configure
@@ -807,11 +856,15 @@ class App(tk.Tk):
             c.itemconfigure(self.tip_tx, state="hidden")
             c.itemconfigure(self.tip_bg, state="hidden")
 
-    # --- hlavní novinka (střídá se) a karty
+    # --- hlavní novinka (střídají se všechny novinky) a spodní karty: GM tým, event, Discord
+    MAX_NEWS = 8
+    GM_ROWS = 4
+
     def build_hero(self):
         c, t = self.c, self.t
         x0, y0, x1, y1 = self.HERO
         self.hero_imgs = [self.img("assets/hero%d.png" % i) for i in (1, 2, 3)]
+        self.news_img, self._img_try = {}, {}
         self.hero_pic = c.create_image(x0 + 1, y0 + 1, anchor="nw", image=self.hero_imgs[0], tags=("hero_click",))
         self.hero_tag = c.create_text(x0 + 26, 300, anchor="sw", text="NOVINKY", fill=t["accent"], font=self.font(10, True))
         self.hero_title = c.create_text(x0 + 26, 346, anchor="sw", width=700, text="Načítám novinky…", fill="#ffffff", font=self.font(23, True), tags=("hero_click",))
@@ -819,46 +872,129 @@ class App(tk.Tk):
         c.create_rectangle(x0 + 26, 398, x0 + 214, 424, fill=t["panel"], outline=t["accent"], tags=("hero_btn", "hero_btn_bg"))
         c.create_text(x0 + 120, 411, text="ČÍST DÁL NA WEBU  →", fill="#ffffff", font=self.font(9, True), tags=("hero_btn",))
         self.dots = []
-        for i in range(3):
-            self.dots.append(c.create_oval(x1 - 66 + i * 18, 410, x1 - 56 + i * 18, 420, fill=t["muted"], outline="", tags=("dot%d" % i,)))
-            c.tag_bind("dot%d" % i, "<Button-1>", lambda e, k=i: self.show_hero(k))
+        for i in range(self.MAX_NEWS):
+            self.dots.append(c.create_oval(0, 410, 10, 420, fill=t["muted"], outline="", tags=("dot%d" % i,), state="hidden"))
+            c.tag_bind("dot%d" % i, "<Button-1>", lambda e, k=i: self.hero_go(k))
+        for tg, x, label in (("hero_prev", x0 + 12, "◀"), ("hero_next", x1 - 40, "▶")):
+            c.create_rectangle(x, 168, x + 28, 212, fill=t["panel"], outline=t["border"], tags=(tg, tg + "_bg"), state="hidden")
+            c.create_text(x + 14, 190, text=label, fill=t["accent"], font=self.font(10, True), tags=(tg, tg + "_tx"), state="hidden")
+            c.tag_bind(tg, "<Enter>", lambda e, g=tg: (c.configure(cursor="hand2"), c.itemconfigure(g + "_bg", outline=t["accent"])))
+            c.tag_bind(tg, "<Leave>", lambda e, g=tg: (c.configure(cursor=""), c.itemconfigure(g + "_bg", outline=t["border"])))
+        c.tag_bind("hero_prev", "<Button-1>", lambda e: self.hero_go(self.hero_i - 1))
+        c.tag_bind("hero_next", "<Button-1>", lambda e: self.hero_go(self.hero_i + 1))
         for tg in ("hero_click", "hero_btn"):
             c.tag_bind(tg, "<Button-1>", lambda e: self.open_news(self.hero_i))
             c.tag_bind(tg, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tg, "<Leave>", lambda e: c.configure(cursor=""))
-        self.thumbs = [self.img("assets/thumb%d.png" % i) for i in (2, 3)]
-        self.card_tag, self.card_title, self.card_date = [], [], []
-        for k in range(2):
-            cx, cy = self.CARDS[k][0], self.CARDS[k][1]
-            tg = "card%d" % k
-            c.create_image(cx + 12, cy + 12, anchor="nw", image=self.thumbs[k], tags=(tg,))
-            self.card_tag.append(c.create_text(cx + 112, cy + 16, anchor="nw", text="", fill=t["accent"], font=self.font(8, True), tags=(tg,)))
-            self.card_title.append(c.create_text(cx + 112, cy + 34, anchor="nw", width=120, text="", fill="#ffffff", font=self.font(10, True), tags=(tg,)))
-            self.card_date.append(c.create_text(cx + 112, cy + 94, anchor="sw", text="", fill=t["muted"], font=self.font(8), tags=(tg,)))
-            c.tag_bind(tg, "<Button-1>", lambda e, n=k + 1: self.open_news(n))
+        # karta 1: GM tým (online/offline, posun kolečkem nebo šipkami)
+        gx, gy = self.CARDS[0][0], self.CARDS[0][1]
+        c.create_text(gx + 16, gy + 18, anchor="w", text="GM TÝM", fill=t["accent"], font=self.font(8, True))
+        self.gm_cnt = c.create_text(gx + 190, gy + 18, anchor="e", text="", fill=t["muted"], font=self.font(8, True))
+        self.gm_up = c.create_text(gx + 204, gy + 18, text="▲", fill=t["accent"], font=self.font(8, True), state="hidden", tags=("gm_up",))
+        self.gm_dn = c.create_text(gx + 222, gy + 18, text="▼", fill=t["accent"], font=self.font(8, True), state="hidden", tags=("gm_dn",))
+        self.gm_rows = []
+        for i in range(self.GM_ROWS):
+            y = gy + 40 + i * 17
+            dot = c.create_oval(gx + 16, y - 4, gx + 24, y + 4, fill=t["muted"], outline="", state="hidden")
+            nm = c.create_text(gx + 32, y, anchor="w", text="", fill=t["panel_text"], font=self.font(9), state="hidden")
+            st = c.create_text(gx + 224, y, anchor="e", text="", fill=t["panel_text"], font=self.font(8, True), state="hidden")
+            self.gm_rows.append((dot, nm, st))
+        self.gm_empty = c.create_text(gx + 16, gy + 40, anchor="nw", width=208, text="Načítám…", fill=t["muted"], font=self.font(9))
+        self.gm_all, self.gm_off = [], 0
+        for tg, step in (("gm_up", -1), ("gm_dn", 1)):
+            c.tag_bind(tg, "<Button-1>", lambda e, k=step: self.gm_scroll(k))
             c.tag_bind(tg, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tg, "<Leave>", lambda e: c.configure(cursor=""))
-        ex, ey = self.CARDS[2][0], self.CARDS[2][1]
+        # karta 2: aktuální event
+        ex, ey = self.CARDS[1][0], self.CARDS[1][1]
         c.create_text(ex + 16, ey + 18, anchor="w", text="AKTUÁLNÍ EVENT", fill=t["accent"], font=self.font(8, True))
         self.ev_title = c.create_text(ex + 16, ey + 40, anchor="w", width=208, text="", fill=t["event_text"], font=self.font(13, True))
         self.ev_text = c.create_text(ex + 16, ey + 56, anchor="nw", width=208, text="", fill=t["panel_text"], font=self.font(9))
         self.ev_left = c.create_text(ex + 16, ey + 96, anchor="w", width=208, text="", fill=t["accent2"], font=self.font(10, True))
         self.ev_data = {}
+        # karta 3: server a hráči online
+        dx, dy = self.CARDS[2][0], self.CARDS[2][1]
+        c.create_text(dx + 16, dy + 18, anchor="w", text="SERVER", fill=t["accent"], font=self.font(8, True))
+        self.on_val = c.create_text(dx + 16, dy + 50, anchor="w", text="…", fill="#ffffff", font=self.font(20, True))
+        self.on_sub = c.create_text(dx + 16, dy + 74, anchor="w", width=208, text="Zjišťuji stav serveru", fill=t["panel_text"], font=self.font(9))
+        self.on_extra = c.create_text(dx + 16, dy + 96, anchor="w", width=208, text="", fill=t["accent2"], font=self.font(9, True))
+        self.stats = (None, None)
+
+    def hero_go(self, i):
+        """Ruční přepnutí novinky; automatické střídání se na chvíli zdrží."""
+        if not self.news:
+            return
+        self.show_hero(i)
+        self.hero_tick = -4
 
     def show_hero(self, i):
         c = self.c
-        self.hero_i = i = i % 3
+        m = len(self.news)
+        self.hero_i = i = i % max(1, m)
         self.hero_tick = 0
-        c.itemconfigure(self.hero_pic, image=self.hero_imgs[i])
+        n = self.news[i] if i < m else None
+        img = self.news_img.get((n or {}).get("image")) or self.hero_imgs[i % 3]
+        c.itemconfigure(self.hero_pic, image=img)
+        x1 = self.HERO[2]
         for k, d in enumerate(self.dots):
-            c.itemconfigure(d, fill=self.t["accent"] if k == i else self.t["muted"])
-        n = self.news[i] if i < len(self.news) else None
+            if k < m and m > 1:
+                cx = x1 - 30 - (m - 1 - k) * 18
+                c.coords(d, cx - 5, 410, cx + 5, 420)
+                c.itemconfigure(d, state="normal", fill=self.t["accent"] if k == i else self.t["muted"])
+            else:
+                c.itemconfigure(d, state="hidden")
+        for tg in ("hero_prev", "hero_next"):
+            c.itemconfigure(tg, state="normal" if m > 1 else "hidden")
         c.itemconfigure(self.hero_title, text=clip(n.get("title"), 90) if n else "Zatím žádné novinky")
         c.itemconfigure(self.hero_text, text=clip(n.get("excerpt"), 200) if n else "Sleduj web, brzy se tu objeví novinky a aktualizace.")
-        c.itemconfigure(self.hero_tag, text=("NOVINKA  ·  " + self.cz_date(n.get("date"))) if n else "NOVINKY")
+        cat = str((n or {}).get("category") or "Novinky").upper()
+        c.itemconfigure(self.hero_tag, text=(cat + "  ·  " + self.cz_date(n.get("date"))) if n else "NOVINKY")
         bb = c.bbox(self.hero_title)
         if bb:
             c.coords(self.hero_tag, self.HERO[0] + 26, bb[1] - 8)
+
+    def load_news_images(self, news):
+        """Stáhne fotky novinek z webu (jen z vlastní domény), upraví je na velikost panelu a uloží do cache vedle nastavení."""
+        cache = os.path.join(DATA_DIR, "newscache")
+        for n in news:
+            url = str(n.get("image") or "")
+            if not url or url in self.news_img or time.time() - self._img_try.get(url, 0) < 300:
+                continue
+            self._img_try[url] = time.time()
+            key = os.path.join(cache, hashlib.sha1(url.encode("utf-8")).hexdigest()[:24] + ".b64")
+            try:
+                if os.path.isfile(key):
+                    with open(key, "r", encoding="ascii") as f:
+                        b64 = f.read()
+                else:
+                    if not url.lower().startswith("https://"):
+                        continue
+                    b64 = news_png_b64(fetch_bytes(url))
+                    if not b64:
+                        return  # bez Pillow fotky nejdou, zůstanou pevné obrázky
+                    try:
+                        os.makedirs(cache, exist_ok=True)
+                        old = sorted((os.path.join(cache, x) for x in os.listdir(cache)), key=os.path.getmtime)
+                        for x in old[:-30]:
+                            os.remove(x)
+                        with open(key, "w", encoding="ascii") as f:
+                            f.write(b64)
+                    except OSError:
+                        pass
+                self.ui(self.set_news_image, url, b64)
+            except Exception:  # noqa: BLE001
+                log_exc()
+
+    def set_news_image(self, url, b64):
+        try:
+            self.news_img[url] = tk.PhotoImage(data=b64)
+        except tk.TclError:
+            return
+        cur = self.news[self.hero_i] if self.hero_i < len(self.news) else None
+        if cur and cur.get("image") == url:
+            keep = self.hero_tick
+            self.show_hero(self.hero_i)
+            self.hero_tick = keep
 
     @staticmethod
     def cz_date(d):
@@ -871,14 +1007,6 @@ class App(tk.Tk):
     def open_news(self, i):
         n = self.news[i] if i < len(self.news) else None
         self.open((n or {}).get("url") or self.link("web"))
-
-    def draw_cards(self):
-        c = self.c
-        for k in range(2):
-            n = self.news[k + 1] if k + 1 < len(self.news) else None
-            c.itemconfigure(self.card_tag[k], text="NOVINKY" if n else "")
-            c.itemconfigure(self.card_title[k], text=clip(n.get("title"), 60) if n else "")
-            c.itemconfigure(self.card_date[k], text=self.cz_date(n.get("date")) if n else "")
 
     # --- přihlášení (pole + uložené účty)
     def accounts_path(self):
@@ -1061,33 +1189,46 @@ class App(tk.Tk):
         self.c.itemconfigure(self.play_txt, text="HRÁT" if who else "PŘIHLÁSIT A HRÁT")
         self.say("%sCH%d  ·  přihlášení přes launcher" % (who, self.channel + 1))
 
-    # --- stav serveru, statistiky a admin tým
+    # --- pravý spodní panel: žebříček (hráči / cechy), listuje se kolečkem myši nebo šipkami
+    TOP_ROWS = 7
+
     def build_side(self):
         c, t = self.c, self.t
-        self.dot = c.create_oval(896, 484, 906, 494, fill=t["muted"], outline="")
-        self.state_id = c.create_text(914, 490, anchor="w", text="Zjišťuji stav…", fill=t["accent2"], font=self.font(10, True))
+        # stav serveru je vidět u kanálů a v kartách, tyto položky zůstávají jen skryté kvůli zbytku kódu
+        self.dot = c.create_oval(0, 0, 1, 1, state="hidden")
+        self.state_id = c.create_text(0, 0, text="", state="hidden")
         self.vals = {}
-        for i, (key, label) in enumerate((("online", "ONLINE"), ("players_24h", "ZA 24 H"), ("accounts", "ÚČTŮ"))):
-            x = 940 + i * 120
-            c.create_text(x, 515, text=label, fill=t["muted"], font=self.font(7, True))
-            self.vals[key] = c.create_text(x, 530, text="–", fill="#ffffff", font=self.font(12, True))
-        c.create_text(896, 561, anchor="w", text="ADMIN TÝM", fill=t["accent2"], font=self.font(10, True))
-        self.gm_rows = []
-        for i in range(4):
-            y = 590 + i * 26
-            dot = c.create_oval(898, y - 5, 908, y + 5, fill=t["muted"], outline="", state="hidden")
-            nm = c.create_text(918, y, anchor="w", text="", fill=t["panel_text"], font=self.font(10), state="hidden")
-            st = c.create_text(1212, y, anchor="e", text="", fill=t["panel_text"], font=self.font(9, True), state="hidden")
-            self.gm_rows.append((dot, nm, st))
-        self.gm_empty = c.create_text(896, 588, anchor="nw", width=320, text="Načítám…", fill=t["muted"], font=self.font(9))
-        self.gm_all, self.gm_off = [], 0
-        self.gm_track = c.create_rectangle(1228, 582, 1232, 690, outline="", fill=t["muted"], stipple="gray25", state="hidden")
-        self.gm_thumb = c.create_rectangle(1228, 582, 1232, 610, outline="", fill=t["accent"], state="hidden")
-        self.gm_up = c.create_text(1196, 561, text="▲", fill=t["accent"], font=self.font(9, True), state="hidden")
-        self.gm_dn = c.create_text(1216, 561, text="▼", fill=t["accent"], font=self.font(9, True), state="hidden")
-        self.gm_cnt = c.create_text(1180, 561, anchor="e", text="", fill=t["muted"], font=self.font(8), state="hidden")
-        c.tag_bind(self.gm_up, "<Button-1>", lambda e: self.gm_scroll(-1))
-        c.tag_bind(self.gm_dn, "<Button-1>", lambda e: self.gm_scroll(1))
+        self.top_tab, self.top_off = "players", 0
+        self.top_data = {"players": [], "guilds": []}
+        self.top_tabs = {}
+        for key, label, x in (("players", "HRÁČI", 896), ("guilds", "CECHY", 968)):
+            tg = "toptab_" + key
+            it = c.create_text(x, 491, anchor="w", text=label, fill=t["muted"], font=self.font(10, True), tags=(tg,))
+            bb = c.bbox(it) or (x, 484, x + 50, 498)
+            ul = c.create_line(bb[0], 502, bb[2], 502, fill=t["accent"], width=2, state="hidden")
+            self.top_tabs[key] = (it, ul)
+            c.tag_bind(tg, "<Button-1>", lambda e, k=key: self.set_top_tab(k))
+            c.tag_bind(tg, "<Enter>", lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tg, "<Leave>", lambda e: c.configure(cursor=""))
+        self.top_cnt = c.create_text(1180, 491, anchor="e", text="", fill=t["muted"], font=self.font(8, True))
+        self.top_up = c.create_text(1198, 491, text="▲", fill=t["accent"], font=self.font(8, True), state="hidden", tags=("top_up",))
+        self.top_dn = c.create_text(1218, 491, text="▼", fill=t["accent"], font=self.font(8, True), state="hidden", tags=("top_dn",))
+        for tg, step in (("top_up", -1), ("top_dn", 1)):
+            c.tag_bind(tg, "<Button-1>", lambda e, k=step: self.top_scroll(k))
+            c.tag_bind(tg, "<Enter>", lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tg, "<Leave>", lambda e: c.configure(cursor=""))
+        self.top_rows = []
+        for i in range(self.TOP_ROWS):
+            y = 526 + i * 24
+            rk = c.create_text(900, y, anchor="w", text="", fill=t["accent"], font=self.font(9, True), state="hidden", tags=("top_click",))
+            nm = c.create_text(932, y, anchor="w", text="", fill="#ffffff", font=self.font(10), state="hidden", tags=("top_click",))
+            lv = c.create_text(1224, y, anchor="e", text="", fill=t["accent2"], font=self.font(9, True), state="hidden", tags=("top_click",))
+            self.top_rows.append((rk, nm, lv))
+        self.top_empty = c.create_text(896, 522, anchor="nw", width=320, text="Načítám žebříček…", fill=t["muted"], font=self.font(9))
+        c.tag_bind("top_click", "<Button-1>", lambda e: self.open(self.link("ranking") or self.link("web")))
+        c.tag_bind("top_click", "<Enter>", lambda e: c.configure(cursor="hand2"))
+        c.tag_bind("top_click", "<Leave>", lambda e: c.configure(cursor=""))
+        self.set_top_tab("players")
 
     # --- stahování
     def build_progress(self):
@@ -1196,8 +1337,11 @@ class App(tk.Tk):
 
     def on_wheel(self, e):
         if not getattr(self, "_set_open", False):
-            if 880 <= e.x <= 1240 and 546 <= e.y <= 696:
+            cx0, cy0, cx1, cy1 = self.CARDS[0]
+            if cx0 <= e.x <= cx1 and cy0 <= e.y <= cy1:
                 self.gm_scroll(-1 if e.delta > 0 else 1)
+            elif 880 <= e.x <= 1240 and 476 <= e.y <= 696:
+                self.top_scroll(-1 if e.delta > 0 else 1)
             return
         for x1, y1, x2, y2, key in getattr(self, "_wheel", []):
             if x1 <= e.x <= x2 and y1 <= e.y <= y2:
@@ -1503,22 +1647,28 @@ class App(tk.Tk):
 
     # --- data z webu ---
     api = {}
+    _sig = {}
 
-    def load_info(self):
+    def load_info(self, full=True):
+        """full = celá odpověď (novinky, statistiky, žebříček); jinak lehká se stavem serveru, kanály, GM a eventem."""
         try:
-            d = json.loads(fetch_small(SITE + "/api/launcher.php").decode("utf-8"))
-        except Exception:
-            self.ui(self.show_info, None)
-            return
+            d = json.loads(fetch_small(SITE + "/api/launcher.php" + ("" if full else "?fast=1")).decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            d = None
+        finally:
+            self._poll_busy = False
         self.ui(self.show_info, d)
 
     def show_info(self, d):
         c = self.c
         if not isinstance(d, dict):
             c.itemconfigure(self.state_id, text="Web nedostupný", fill=self.t["bad"])
-            c.itemconfigure(self.hero_text, text="Informace z webu se nepodařilo načíst. Zkontroluj připojení k internetu.")
+            if not self.news:
+                c.itemconfigure(self.hero_text, text="Informace z webu se nepodařilo načíst. Zkontroluj připojení k internetu.")
             return
-        self.api = d
+        full = not d.get("fast")
+        self.api = d if full or not self.api else {**self.api, **d}
+        sig = self._sig
         self.music_from_api(d)
         fx = d.get("fx")
         if isinstance(fx, dict):
@@ -1526,21 +1676,39 @@ class App(tk.Tk):
         up = bool(d.get("server_online"))
         c.itemconfigure(self.dot, fill=self.t["ok"] if up else self.t["bad"])
         c.itemconfigure(self.state_id, text="SERVER ONLINE" if up else "SERVER OFFLINE", fill=self.t["ok"] if up else self.t["bad"])
+        self.draw_online(d, up)
         for key, item in self.vals.items():
             v = d.get(key)
+            if v is None and not full and key != "online":
+                continue  # rychlá odpověď neobsahuje celkové statistiky, ponecháme poslední hodnotu
             c.itemconfigure(item, text="–" if v is None else "{:,}".format(int(v)).replace(",", " "))
-        self.show_gms(d.get("gms"))
-        news = [n for n in (d.get("news") or []) if isinstance(n, dict)][:3]
-        self.news = news
-        self.show_hero(self.hero_i)
-        self.draw_cards()
-        try:
-            nch = max(1, min(8, int(d.get("channels") or CFG.get("channels") or 4)))
-        except (TypeError, ValueError):
-            nch = 4
-        if nch != self.n_channels:
-            self.n_channels = nch
-        self.draw_channels()
+        gms = json.dumps(d.get("gms"), sort_keys=True)
+        if gms != sig.get("gms"):
+            sig["gms"] = gms
+            self.show_gms(d.get("gms"))
+        if full:
+            news = [n for n in (d.get("news") or []) if isinstance(n, dict)][:self.MAX_NEWS]
+            if news != self.news or not getattr(self, "_news_ok", False):
+                self._news_ok = True
+                self.news = news
+                self.hero_i = min(self.hero_i, max(0, len(news) - 1))
+                self.show_hero(self.hero_i)
+                keep = {n.get("image") for n in news}
+                for u in [u for u in self.news_img if u not in keep]:
+                    del self.news_img[u]
+                threading.Thread(target=self.load_news_images, args=(list(news),), daemon=True).start()
+            self.set_top(d.get("top"), d.get("top_guilds"))
+            self.stats = (d.get("players_24h"), d.get("accounts"))
+        chs = json.dumps([d.get("channels"), d.get("channels_on"), up])
+        if chs != sig.get("ch"):
+            sig["ch"] = chs
+            try:
+                nch = max(1, min(8, int(d.get("channels") or CFG.get("channels") or 4)))
+            except (TypeError, ValueError):
+                nch = 4
+            if nch != self.n_channels:
+                self.n_channels = nch
+            self.draw_channels()
         ev = d.get("event") or {}
         now = time.time()
         self.ev_data = {
@@ -1550,6 +1718,61 @@ class App(tk.Tk):
         }
         self.show_event()
         self.c.tag_raise("note")  # okénko se zprávou zůstává nad vším, i když se obsah překreslí
+
+    def set_top(self, players, guilds):
+        ok = lambda v: [r for r in (v or []) if isinstance(r, dict)][:20]
+        self.top_data = {"players": ok(players), "guilds": ok(guilds)}
+        self.draw_top()
+
+    def set_top_tab(self, key):
+        self.top_tab, self.top_off = key, 0
+        for k, (it, ul) in self.top_tabs.items():
+            self.c.itemconfigure(it, fill=self.t["accent2"] if k == key else self.t["muted"])
+            self.c.itemconfigure(ul, state="normal" if k == key else "hidden")
+        self.draw_top()
+
+    def top_scroll(self, step):
+        n, k = len(self.top_data[self.top_tab]), len(self.top_rows)
+        if n > k:
+            self.top_off = min(max(0, self.top_off + step), n - k)
+            self.draw_top()
+
+    def draw_top(self, *_):
+        c = self.c
+        rows = self.top_data[self.top_tab]
+        n, k = len(rows), len(self.top_rows)
+        self.top_off = min(max(0, self.top_off), max(0, n - k))
+        c.itemconfigure(self.top_empty, text="" if n else "Žebříček zatím není k dispozici.")
+        for i, (rk, nm, lv) in enumerate(self.top_rows):
+            idx = self.top_off + i
+            if idx < n:
+                r = rows[idx]
+                right = "Lv %s" % r.get("level", "?")
+                if self.top_tab == "guilds" and r.get("points"):
+                    right += "  ·  %s b." % r.get("points")
+                c.itemconfigure(rk, state="normal", text="%d." % (idx + 1))
+                c.itemconfigure(nm, state="normal", text=clip(r.get("name"), 24))
+                c.itemconfigure(lv, state="normal", text=right)
+            else:
+                for it in (rk, nm, lv):
+                    c.itemconfigure(it, state="hidden")
+        more = n > k
+        for it in (self.top_up, self.top_dn):
+            c.itemconfigure(it, state="normal" if more else "hidden")
+        c.itemconfigure(self.top_cnt, text="%d–%d / %d" % (self.top_off + 1, min(n, self.top_off + k), n) if more else "")
+
+    def draw_online(self, d, up):
+        c = self.c
+        n = d.get("online")
+        if up:
+            c.itemconfigure(self.on_val, text="–" if n is None else "%s online" % "{:,}".format(int(n)).replace(",", " "), fill="#ffffff")
+            c.itemconfigure(self.on_sub, text="hráčů právě ve hře")
+        else:
+            c.itemconfigure(self.on_val, text="OFFLINE", fill=self.t["bad"])
+            c.itemconfigure(self.on_sub, text="Server je teď vypnutý")
+        day, acc = self.stats
+        fmt = lambda v: "–" if v is None else "{:,}".format(int(v)).replace(",", " ")
+        c.itemconfigure(self.on_extra, text="Za 24 h: %s  ·  Účtů: %s" % (fmt(day), fmt(acc)) if up else "")
 
     @staticmethod
     def left_text(sec):
@@ -1587,37 +1810,38 @@ class App(tk.Tk):
         c = self.c
         n, k = len(self.gm_all), len(self.gm_rows)
         self.gm_off = min(max(0, self.gm_off), max(0, n - k))
-        c.itemconfigure(self.gm_empty, text="" if n else "Seznam admin týmu zatím není nastaven.")
+        c.itemconfigure(self.gm_empty, text="" if n else "Seznam GM týmu zatím není nastaven.")
         for i, (dot, nm, st) in enumerate(self.gm_rows):
             idx = self.gm_off + i
             if idx < n:
                 g = self.gm_all[idx]
                 on = bool(g.get("online"))
                 c.itemconfigure(dot, state="normal", fill=self.t["ok"] if on else self.t["bad"])
-                c.itemconfigure(nm, state="normal", text=clip(g.get("name"), 22), fill=self.t["panel_text"])
+                c.itemconfigure(nm, state="normal", text=clip(g.get("name"), 20), fill=self.t["panel_text"] if on else self.t["muted"])
                 c.itemconfigure(st, state="normal", text="online" if on else "offline", fill=self.t["ok"] if on else self.t["bad"])
             else:
                 for it in (dot, nm, st):
                     c.itemconfigure(it, state="hidden")
         more = n > k
-        for it in (self.gm_track, self.gm_thumb, self.gm_up, self.gm_dn, self.gm_cnt):
+        for it in (self.gm_up, self.gm_dn):
             c.itemconfigure(it, state="normal" if more else "hidden")
-        if more:
-            top, bot = 582, 690
-            h = max(14, (bot - top) * k // n)
-            y = top + (bot - top - h) * self.gm_off // max(1, n - k)
-            c.coords(self.gm_thumb, 1228, y, 1232, y + h)
-            c.itemconfigure(self.gm_cnt, text="%d–%d / %d" % (self.gm_off + 1, min(n, self.gm_off + k), n))
+        on_n = sum(1 for g in self.gm_all if g.get("online"))
+        c.itemconfigure(self.gm_cnt, text="%d online" % on_n if n else "")
+        c.coords(self.gm_cnt, self.CARDS[0][0] + (190 if more else 224), self.CARDS[0][1] + 18)
 
     def hero_loop(self):
         self.hero_tick += 1
-        if self.hero_tick >= 9 and len(self.news) > 1 and not getattr(self, "_set_open", False):
-            self.show_hero((self.hero_i + 1) % max(1, min(3, len(self.news))))
+        if self.hero_tick >= 8 and len(self.news) > 1 and not getattr(self, "_set_open", False):
+            self.show_hero((self.hero_i + 1) % len(self.news))
         self.after(1000, self.hero_loop)
 
     def refresh_loop(self):
-        threading.Thread(target=self.load_info, daemon=True).start()
-        self.after(10000, self.refresh_loop)
+        """Každé 3 s lehký dotaz (GM, kanály, stav serveru), každých 30 s celý (novinky, statistiky, žebříček)."""
+        self._poll_n = getattr(self, "_poll_n", 0) + 1
+        if not getattr(self, "_poll_busy", False):
+            self._poll_busy = True
+            threading.Thread(target=self.load_info, args=(self._poll_n % 10 == 1,), daemon=True).start()
+        self.after(3000, self.refresh_loop)
 
     def event_tick(self):
         try:

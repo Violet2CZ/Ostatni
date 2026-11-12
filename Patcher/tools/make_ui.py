@@ -14,8 +14,7 @@ HERO = (96, 74, 856, 434)
 CARDS = [(96, 450, 336, 560), (356, 450, 596, 560), (616, 450, 856, 560)]
 LOGIN = (880, 74, 1240, 300)
 CHAN = (880, 308, 1240, 388)
-STATS = (880, 476, 1240, 538)
-GMS = (880, 546, 1240, 696)
+GMS = (880, 476, 1240, 696)  # žebříček (hráči / cechy)
 PROG = (96, 576, 856, 696)
 
 
@@ -54,7 +53,7 @@ def ui_bg():
     box(HERO, fill=(4, 14, 30))
     for b in CARDS:
         box(b)
-    for b in (LOGIN, CHAN, STATS, GMS):
+    for b in (LOGIN, CHAN, GMS):
         box(b)
         d.line([(b[0] + 14, b[1] + 30), (b[2] - 14, b[1] + 30)], fill=(24, 74, 108, 255), width=1)
     # lišta stahování
