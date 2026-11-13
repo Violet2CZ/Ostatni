@@ -1,4 +1,4 @@
-# Violet2 Launcher a patcher (open source, MIT)
+# Violet2 Launcher a patcher (proprietární software, všechna práva vyhrazena)
 
 Launcher má vlastní okno (bez systémového rámu, minimalizace a zavření), efekty (padající lístky, tečky, třpyt), stav serveru ONLINE/OFFLINE, počet hráčů online a za 24 h, novinky a event z webu, dvě lišty stahování (soubor a celkem) a tlačítka Hrát, Nastavení, Web, Podpora, Facebook a Discord.
 Kompletní postup nasazení: **NAVOD-NASAZENI.txt**.

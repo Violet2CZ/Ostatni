@@ -1,6 +1,6 @@
 """Ed25519 (RFC 8032) v čisté Pythonu bez závislostí. Podpis patch manifestu: launcher ověří,
 že manifest podepsal majitel privátního klíče, takže se do hry nedá podstrčit cizí soubor
-ani při průniku na server. MIT licence."""
+ani při průniku na server. Proprietární software (viz LICENSE)."""
 import hashlib
 
 _p = 2 ** 255 - 19

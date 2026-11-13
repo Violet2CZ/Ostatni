@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Violet2 Launcher a patcher (open source, MIT pro kód; název, logo a grafika Violet2 viz LICENSE).
+"""Violet2 Launcher a patcher (proprietární software, všechna práva vyhrazena, viz LICENSE).
 Jen standardní knihovna Pythonu 3.9+ (Tkinter). Žádná IP adresa ani heslo v launcheru není:
 stav serveru a počty hráčů dodává web přes HTTPS, patche jsou podepsané (Ed25519)."""
 import base64
@@ -35,7 +35,7 @@ try:  # volitelné: s Pillow launcher ukáže fotky novinek z webu, bez něj pou
 except Exception:  # noqa: BLE001
     Image = None
 
-VERSION = "2.0.12"
+VERSION = "2.3.0"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 # Vlastní data launcheru (stav, hudba, logy) NEJSOU ve složce hry, ale v %APPDATA%\\Violet2Launcher
 DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Violet2Launcher")
@@ -47,7 +47,7 @@ UA = "Violet2Launcher/" + VERSION
 
 FX_KINDS = ("snow", "leaves", "sakura", "sparks")
 FX_COUNT = {"low": 10, "mid": 18, "high": 34}
-LEAF_COLORS = ("#d2691e", "#c0392b", "#e08a1e", "#b8860b", "#a0522d", "#d35400")
+LEAF_COLORS = ("#8e44ff", "#b66bff", "#6c2bd9", "#d7a8ff", "#a05cff", "#7a3fd0")
 
 
 def season_fx():
@@ -80,7 +80,7 @@ DEFAULT_THEME = {
     "title": "Violet2", "tagline": "", "font": "Segoe UI", "effects": True, "bg": "#bfe6f7", "text": "#e6f4ea", "muted": "#8fb7a0",
     "accent": "#3fc17b", "accent2": "#ffe9a8", "title_text": "#0f3a4d", "title_btn": "#e4f5ff", "tagline_text": "#14506a",
     "panel_title": "#0f4f6b", "panel_text": "#1d4458", "event_text": "#7a3fd0", "bar_outline": "#e8c878", "bar_bg": "#103246",
-    "bar_file": "#5ec4ff", "note_bg": "#0c1d33", "panel": "#081a32", "border": "#2f7fa6", "ok": "#2ecc71", "bad": "#e5484d", "field": "#05122a", "rail_on": "#0f3550", "play_text": "#04202a", "icon": "", "background": "", "panels": "", "logo": "", "buttons": {},
+    "bar_file": "#5ec4ff", "note_bg": "#0c1d33", "panel": "#081a32", "border": "#2f7fa6", "ok": "#2ecc71", "bad": "#e5484d", "field": "#05122a", "rail_on": "#0f3550", "play_text": "#04202a", "gold": "#e2bc6a", "play_fill": "#7b2fe0", "play_hover": "#9a52ff", "icon": "", "background": "", "panels": "", "logo": "", "buttons": {},
 }
 CFG = load_json("launcher.json")
 THEME = dict(DEFAULT_THEME)
@@ -140,13 +140,57 @@ class OnlyHttps(urllib.request.HTTPRedirectHandler):
 OPENER = urllib.request.build_opener(OnlyHttps, urllib.request.HTTPSHandler(context=CTX))
 
 
+_net = {"last": 0.0, "until": 0.0, "fails": 0}
+_net_lock = threading.Lock()
+
+
+def _throttle(url):
+    """Ochrana proti zahlcení: mezi dotazy je minimální odstup a po chybě serveru (429, 5xx, výpadek) se čeká se stoupající prodlevou.
+    Launcher tak server nikdy nebombarduje, ani když běží tisíce klientů najednou. Stahování souborů patche není zdržováno."""
+    now = time.time()
+    with _net_lock:
+        if "/api/" in url and now < _net["until"]:
+            raise RuntimeError("Server je dočasně přetížený, zkusím to za %d s" % (_net["until"] - now))
+        wait = _net["last"] + (0.25 if "/api/" in url else 0.02) - now
+        _net["last"] = max(now, _net["last"]) + (0.25 if "/api/" in url else 0.02)
+    if wait > 0:
+        time.sleep(min(wait, 2.0))
+
+
+def _net_fail(url, retry_after=0):
+    if "/api/" not in url:
+        return
+    with _net_lock:
+        _net["fails"] = min(_net["fails"] + 1, 8)
+        delay = retry_after or min(300, 5 * 2 ** _net["fails"])
+        _net["until"] = time.time() + delay * (0.8 + 0.4 * random.random())
+
+
+def _net_ok():
+    with _net_lock:
+        _net["fails"] = 0
+        _net["until"] = 0.0
+
+
 def fetch(url, timeout=15):
     if urllib.parse.urlparse(url).hostname not in ALLOWED:
         raise ValueError("Cizí adresa zakázána")
+    _throttle(url)
     try:
-        return OPENER.open(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout)
+        r = OPENER.open(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout)
+        _net_ok()
+        return r
     except urllib.error.HTTPError as ex:
+        if ex.code == 429 or ex.code >= 500:
+            try:
+                ra = int(ex.headers.get("Retry-After", "0") or 0)
+            except (TypeError, ValueError):
+                ra = 0
+            _net_fail(url, min(ra, 600))
         raise RuntimeError("Server vrátil HTTP %s pro adresu %s" % (ex.code, url)) from None
+    except (urllib.error.URLError, OSError):
+        _net_fail(url)
+        raise
 
 
 def fetch_small(url):
@@ -578,6 +622,10 @@ class App(tk.Tk):
         self.resizable(False, False)
         self.geometry("%dx%d+%d+%d" % (self.W, self.H, (self.winfo_screenwidth() - self.W) // 2, max((self.winfo_screenheight() - self.H) // 2, 0)))
         self.configure(bg=t["bg"])
+        try:  # okno není obdélník: barva KEY je průhledná (seříznuté rohy a zářezy jsou vypálené v pozadí)
+            self.attributes("-transparentcolor", self.KEY)
+        except Exception:
+            pass
         self.pick_fonts()
         if os.path.isfile(res(t.get("icon", ""))):
             try:
@@ -586,12 +634,13 @@ class App(tk.Tk):
                 pass
         self.q = queue.Queue()
         self.imgs, self.busy, self._drag = {}, True, None
-        c = self.c = tk.Canvas(self, width=self.W, height=self.H, highlightthickness=0, bg=t["bg"])
+        c = self.c = tk.Canvas(self, width=self.W, height=self.H, highlightthickness=0, bg=self.KEY)
         c.pack()
+        self.bg_top = None
         for key in ("background", "panels"):
             im = self.img(t.get(key))
             if im:
-                c.create_image(0, 0, anchor="nw", image=im)
+                self.bg_top = c.create_image(0, 0, anchor="nw", image=im)
         self.particles = []
         self.fx_kind, self.fx_level = "off", ""
         if t.get("effects", True):
@@ -706,11 +755,16 @@ class App(tk.Tk):
             pass
 
     # --- sestavení ---
-    # Rozložení (1280x720): levá lišta, novinky + karty, dole stahování, vpravo přihlášení, kanály, statistiky a admin tým.
-    HERO = (96, 74, 856, 434)
-    CARDS = ((96, 450, 336, 560), (356, 450, 596, 560), (616, 450, 856, 560))
-    RAIL = (("news", "Novinky", None), ("rank", "Žebříček", "ranking"), ("discord", "Discord", "discord"),
-            ("facebook", "Facebook", "facebook"), ("web", "Web", "web"), ("help", "Podpora", "support"))
+    # Rozložení (1280x720): ilustrace přes celé okno. Dole stav stahování a aktuální novinka, vpravo přihlášení, kanály a HRÁT,
+    # vlevo dole menu, vlevo nahoře odkazy. Novinky, GM tým, event, server a žebříček jsou na stránce přes celé okno.
+    HERO = (68, 74, 828, 434)
+    CARDS = ((68, 450, 308, 560), (328, 450, 568, 560), (588, 450, 828, 560))
+    RANK = (852, 74, 1212, 560)
+    DOCK_R = (924, 348, 1256, 702)
+    KEY = "#010203"
+    PAGE_DY = 3000  # položky stránky jsou mimo okno, dokud se stránka neotevře
+    CHIPS = (("web", "Web", "web"), ("discord", "Discord", "discord"), ("facebook", "Facebook", "facebook"), ("help", "Podpora", "support"))
+    BAR_X0, BAR_X1 = 470, 888
 
     def build_ui(self):
         t, c = self.t, self.c
@@ -721,6 +775,7 @@ class App(tk.Tk):
         except (TypeError, ValueError):
             self.hover_level = 4
         self.news, self.hero_i, self.hero_tick = [], 0, 0
+        self.pg_open, self.pg_dy = False, self.PAGE_DY
         self.channel = int(self.pstate.get("channel", 0) or 0)
         self.remember = bool(self.pstate.get("remember", True))
         self.n_channels = max(1, min(8, int(CFG.get("channels", 4) or 4)))
@@ -734,17 +789,13 @@ class App(tk.Tk):
                     self.sel_slot = i
             if self.sel_slot < 0:
                 self.sel_slot = next(i for i, a in enumerate(self.store.slots) if a)
-        # lišta okna
-        logo = self.img("assets/logo_small.png")
-        if logo:
-            c.create_image(18, 9, anchor="nw", image=logo)
-        c.create_text(70, 29, anchor="w", text="V I O L E T 2", fill=t["title_text"], font=self.font(15, True))
-        self.sub_id = c.create_text(222, 31, anchor="w", text="LAUNCHER   ·   NOVINKY", fill=t["muted"], font=self.font(9, True))
+        # tlačítka okna vpravo nahoře (okno nemá systémový rám)
+        self.sub_id = c.create_text(0, 0, text="", state="hidden")
         for tag, x, label in (("btn_min", self.W - 86, "—"), ("btn_close", self.W - 46, "×")):
-            c.create_rectangle(x, 14, x + 34, 42, fill=t["title_btn"], outline=t["border"], tags=(tag, tag + "_bg"))
+            c.create_polygon(self.skew_poly(x, 14, x + 34, 42, 3, 10), fill=t["title_btn"], outline=t["accent"], width=1, tags=(tag, tag + "_bg"))
             c.create_text(x + 17, 28, text=label, fill=t["title_text"], font=self.font(12, True), tags=(tag,))
         for tag, x, label in (("btn_mus", self.W - 126, "♪"), ("btn_vup", self.W - 166, "+"), ("btn_vdn", self.W - 206, "−")):
-            c.create_rectangle(x, 14, x + 34, 42, fill=t["title_btn"], outline=t["border"], tags=(tag, tag + "_bg"))
+            c.create_polygon(self.skew_poly(x, 14, x + 34, 42, 3, 10), fill=t["title_btn"], outline=t["accent"], width=1, tags=(tag, tag + "_bg"))
             item = c.create_text(x + 17, 28, text=label, fill=t["title_text"], font=self.font(12, True), tags=(tag,))
             if tag == "btn_mus":
                 self.mus_txt = item
@@ -758,48 +809,114 @@ class App(tk.Tk):
         c.bind("<B1-Motion>", self.drag_move)
         c.bind("<ButtonRelease-1>", lambda e: setattr(self, "_sl", None))
         c.bind("<MouseWheel>", self.on_wheel)
+        self.bind("<Escape>", lambda e: self.close_settings() if getattr(self, "_set_open", False) else self.close_page())
+        # hlavní scéna
         self.build_rail()
-        self.build_hero()
+        self.build_chips()
         self.build_login()
         self.build_channels()
         self.build_play()
-        self.build_side()
         self.build_progress()
+        # stránka přes celé okno (novinky, GM tým, event, server, žebříček)
+        self.build_page()
+        for tag in ("btn_min", "btn_close", "btn_mus", "btn_vup", "btn_vdn"):
+            c.tag_raise(tag)
+        c.tag_raise(self.vol_id)
         self.tip_bg = c.create_rectangle(0, 0, 1, 1, fill=t["note_bg"], outline=t["border"], state="hidden")
         self.tip_tx = c.create_text(0, 0, anchor="w", text="", fill="#ffffff", font=self.font(10, True), state="hidden")
 
-    # --- levá lišta s ikonami
+    # --- stránka přes celé okno
+    def build_page(self):
+        c, t = self.c, self.t
+        pg_img = self.img(t.get("bg_page"))
+        if pg_img:
+            self.bg_page = c.create_image(0, 0, anchor="nw", image=pg_img, state="hidden")
+        else:
+            self.bg_page = c.create_rectangle(0, 0, self.W, self.H, fill=t["bg"], outline="", state="hidden")
+        mark = set(c.find_all())
+        self.build_hero()
+        self.build_side()
+        pts = self.skew_poly(540, 618, 740, 664, 6, 20)
+        c.create_polygon(pts, fill=t.get("play_fill", "#7b2fe0"), outline=t["gold"], width=2, tags=("pg_back", "pg_back_bg"))
+        c.create_text(640, 641, text="ZPĚT", fill="#ffffff", font=self.font(13, True), tags=("pg_back",))
+        c.tag_bind("pg_back", "<Button-1>", lambda e: self.close_page())
+        c.tag_bind("pg_back", "<Enter>", lambda e: (c.configure(cursor="hand2"), c.itemconfigure("pg_back_bg", fill=t.get("play_hover", "#9a52ff"))))
+        c.tag_bind("pg_back", "<Leave>", lambda e: (c.configure(cursor=""), c.itemconfigure("pg_back_bg", fill=t.get("play_fill", "#7b2fe0"))))
+        for i in c.find_all():
+            if i not in mark:
+                c.addtag_withtag("pg", i)
+        c.move("pg", 0, self.PAGE_DY)
+
+    @staticmethod
+    def skew_poly(x1, y1, x2, y2, a, b):
+        """Nesouměrné seříznutí: vlevo nahoře a vpravo dole velký zub, ostatní rohy jen malý."""
+        return [x1 + b, y1, x2 - a, y1, x2, y1 + a, x2, y2 - b, x2 - b, y2, x1 + a, y2, x1, y2 - a, x1, y1 + b]
+
+    @staticmethod
+    def cut_poly(x1, y1, x2, y2, k):
+        """Obdélník se seříznutými rohy (jako tlačítka ve hrách)."""
+        return [x1 + k, y1, x2 - k, y1, x2, y1 + k, x2, y2 - k, x2 - k, y2, x1 + k, y2, x1, y2 - k, x1, y1 + k]
+
+    def open_page(self):
+        if self.pg_open or getattr(self, "_set_open", False):
+            return
+        c = self.c
+        self.pg_open = True
+        self.entries_visible(False)
+        c.itemconfigure(self.bg_page, state="normal")
+        c.move("pg", 0, -self.pg_dy)
+        self.pg_dy = 0
+        self.hero_tick = 0
+        self.hover_set(None)
+        c.configure(cursor="")
+
+    def close_page(self):
+        if not self.pg_open:
+            return
+        c = self.c
+        self.pg_open = False
+        c.move("pg", 0, self.PAGE_DY - self.pg_dy)
+        self.pg_dy = self.PAGE_DY
+        c.itemconfigure(self.bg_page, state="hidden")
+        c.configure(cursor="")
+        self.entries_visible(True)
+
+    # --- odkazy vlevo nahoře a menu vlevo dole
     def build_rail(self):
         c, t = self.c, self.t
-        items = [(ic, label, key, 102 + i * 58) for i, (ic, label, key) in enumerate(self.RAIL)]
-        items += [("user", "Účet a přihlášení", "_account", 612), ("gear", "Nastavení hry", "_settings", 664)]
         self.rail_imgs = {}
         self.rail_items, self._hov = [], None
-        for ic, label, key, y in items:
-            tag = "rail_" + ic
-            self.rail_imgs[ic] = (self.img("assets/ic_%s.png" % ic), self.img("assets/ic_%s_on.png" % ic))
-            on = ic == "news"
-            c.create_rectangle(16, y - 23, 60, y + 23, fill=t["rail_on"] if on else "", outline=t["accent"] if on else "", tags=(tag, tag + "_box"))
-            c.create_image(38, y, image=self.rail_imgs[ic][1 if on else 0], tags=(tag, tag + "_ic"))
-            if key is None:
-                cmd = lambda: self.show_hero(self.hero_i)
-            elif key == "_account":
-                cmd = self.toggle_mode
-            elif key == "_settings":
-                cmd = self.open_settings
-            else:
-                cmd = lambda k=key: self.open(self.link(k))
-            c.tag_bind(tag, "<Button-1>", lambda e, f=cmd: f())
-            self.rail_items.append((ic, label, y))
         c.bind("<Motion>", self.on_motion, add="+")
         c.bind("<Leave>", lambda e: self.hover_set(None), add="+")
+        for i, (label, cmd) in enumerate((("NOVINKY A ŽEBŘÍČEK", self.open_page), ("NASTAVENÍ HRY", self.open_settings))):
+            y = 644 + i * 34
+            tag = "nav%d" % i
+            c.create_polygon(self.skew_poly(36, y - 15, 238, y + 15, 4, 14), fill=t["field"], outline=t["border"], width=1, tags=(tag, tag + "_bg"))
+            c.create_polygon(36, y - 6, 41, y - 6, 41, y + 6, 36, y + 6, fill=t["accent"], outline="", tags=(tag,))
+            c.create_text(54, y, text="◆", fill=t["gold"], font=self.font(8, True), tags=(tag,))
+            tx = c.create_text(70, y, anchor="w", text=label, fill=t["text"], font=self.font(11, True), tags=(tag,))
+            c.tag_bind(tag, "<Button-1>", lambda e, f=cmd: f())
+            c.tag_bind(tag, "<Enter>", lambda e, it=tx, tg=tag: (c.configure(cursor="hand2"), c.itemconfigure(it, fill="#ffffff"), c.itemconfigure(tg + "_bg", fill=t["rail_on"], outline=t["accent"])))
+            c.tag_bind(tag, "<Leave>", lambda e, it=tx, tg=tag: (c.configure(cursor=""), c.itemconfigure(it, fill=t["text"]), c.itemconfigure(tg + "_bg", fill=t["field"], outline=t["border"])))
+
+    def build_chips(self):
+        """Odkazy (Web, Discord, Facebook, Podpora) jsou v hlavním okně nahoře vlevo."""
+        c, t = self.c, self.t
+        for i, (ic, label, key) in enumerate(self.CHIPS):
+            x, y = 84 + i * 44, 50
+            tag = "rail_" + ic
+            self.rail_imgs[ic] = (self.img("assets/ic_%s.png" % ic), self.img("assets/ic_%s_on.png" % ic))
+            c.create_polygon(self.skew_poly(x - 17, y - 17, x + 17, y + 17, 4, 11), fill=t["title_btn"], outline=t["border"], width=2, tags=(tag, tag + "_box"))
+            c.create_image(x, y, image=self.rail_imgs[ic][0], tags=(tag, tag + "_ic"))
+            c.tag_bind(tag, "<Button-1>", lambda e, k=key: self.open(self.link(k)))
+            self.rail_items.append((ic, label, x, y))
 
     def on_motion(self, e):
         """Jedno sledování myši místo událostí jednotlivých tlačítek: mění se jen při přechodu na jiné tlačítko."""
         idx = None
-        if 14 <= e.x <= 62:
-            for k, (ic, label, y) in enumerate(self.rail_items):
-                if abs(e.y - y) <= 23:
+        if not self.pg_open and not getattr(self, "_set_open", False) and e.y <= 76:
+            for k, (ic, label, x, y) in enumerate(self.rail_items):
+                if abs(e.x - x) <= 19 and abs(e.y - y) <= 19:
                     idx = k
                     break
         if idx != self._hov:
@@ -815,12 +932,12 @@ class App(tk.Tk):
             if old is not None:
                 self.rail_leave(self.rail_items[old][0])
             if idx is not None:
-                ic, label, y = self.rail_items[idx]
-                self.rail_enter(ic, label, y)
+                ic, label, x, y = self.rail_items[idx]
+                self.rail_enter(ic, label, x, y)
         finally:
             self._hov_busy = False
 
-    def rail_enter(self, ic, label, y):
+    def rail_enter(self, ic, label, x, y):
         lv = self.hover_level
         if lv < 1:
             return
@@ -835,8 +952,8 @@ class App(tk.Tk):
             return
         c.itemconfigure(self.tip_tx, text=label, state="normal")
         x1, y1, x2, y2 = c.bbox(self.tip_tx) if c.bbox(self.tip_tx) else (0, 0, 80, 14)
-        c.coords(self.tip_tx, 74, y)
-        c.coords(self.tip_bg, 68, y - 14, 74 + (x2 - x1) + 10, y + 14)
+        c.coords(self.tip_tx, x - 14, y - 34)
+        c.coords(self.tip_bg, x - 20, y - 48, x - 14 + (x2 - x1) + 10, y - 20)
         c.itemconfigure(self.tip_bg, state="normal")
         c.tag_raise(self.tip_bg)
         c.tag_raise(self.tip_tx)
@@ -848,10 +965,9 @@ class App(tk.Tk):
         c = self.c
         if lv >= 4:
             c.configure(cursor="")
-        if ic != "news":
-            c.itemconfigure("rail_%s_box" % ic, outline="")
-            if lv >= 2:
-                c.itemconfigure("rail_%s_ic" % ic, image=self.rail_imgs[ic][0])
+        c.itemconfigure("rail_%s_box" % ic, outline=self.t["border"])
+        if lv >= 2:
+            c.itemconfigure("rail_%s_ic" % ic, image=self.rail_imgs[ic][0])
         if lv >= 3:
             c.itemconfigure(self.tip_tx, state="hidden")
             c.itemconfigure(self.tip_bg, state="hidden")
@@ -939,7 +1055,7 @@ class App(tk.Tk):
         for k, d in enumerate(self.dots):
             if k < m and m > 1:
                 cx = x1 - 30 - (m - 1 - k) * 18
-                c.coords(d, cx - 5, 410, cx + 5, 420)
+                c.coords(d, cx - 5, 410 + self.pg_dy, cx + 5, 420 + self.pg_dy)
                 c.itemconfigure(d, state="normal", fill=self.t["accent"] if k == i else self.t["muted"])
             else:
                 c.itemconfigure(d, state="hidden")
@@ -952,6 +1068,8 @@ class App(tk.Tk):
         bb = c.bbox(self.hero_title)
         if bb:
             c.coords(self.hero_tag, self.HERO[0] + 26, bb[1] - 8)
+        c.itemconfigure(self.tk_cat, text=(cat + "  ·  " + self.cz_date(n.get("date"))) if n else "NOVINKY")
+        c.itemconfigure(self.tk_title, text=clip(n.get("title"), 60) if n else "Zatím žádné novinky")
 
     def load_news_images(self, news):
         """Stáhne fotky novinek z webu (jen z vlastní domény), upraví je na velikost panelu a uloží do cache vedle nastavení."""
@@ -1024,28 +1142,28 @@ class App(tk.Tk):
 
     def build_login(self):
         c, t = self.c, self.t
-        self.lg_title = c.create_text(896, 89, anchor="w", text="PŘIHLÁŠENÍ", fill=t["accent2"], font=self.font(10, True))
-        self.lg_switch = c.create_text(1224, 89, anchor="e", text="", fill=t["accent"], font=self.font(9, True), tags=("lg_switch",))
+        self.lg_title = c.create_text(944, 364, anchor="w", text="PŘIHLÁŠENÍ", fill=t["accent2"], font=self.font(10, True))
+        self.lg_switch = c.create_text(1236, 364, anchor="e", text="", fill=t["accent"], font=self.font(9, True), tags=("lg_switch",))
         c.tag_bind("lg_switch", "<Button-1>", lambda e: self.toggle_mode())
         c.tag_bind("lg_switch", "<Enter>", lambda e: c.configure(cursor="hand2"))
         c.tag_bind("lg_switch", "<Leave>", lambda e: c.configure(cursor=""))
         self.e_id, self.e_pw = self.make_entry(), self.make_entry("•")
-        self.w_id = c.create_window(896, 132, anchor="nw", window=self.e_id, width=328, height=30)
-        self.w_pw = c.create_window(896, 190, anchor="nw", window=self.e_pw, width=328, height=30)
-        c.create_text(896, 122, anchor="w", text="PŘEZDÍVKA NEBO E-MAIL", fill=t["muted"], font=self.font(8, True), tags=("lg_login",))
-        c.create_text(896, 180, anchor="w", text="HESLO", fill=t["muted"], font=self.font(8, True), tags=("lg_login",))
-        c.create_text(1224, 180, anchor="e", text="ukázat", fill=t["accent"], font=self.font(8, True), tags=("lg_login", "lg_show"))
+        self.w_id = c.create_window(944, 402, anchor="nw", window=self.e_id, width=292, height=28)
+        self.w_pw = c.create_window(944, 450, anchor="nw", window=self.e_pw, width=292, height=28)
+        c.create_text(944, 392, anchor="w", text="PŘEZDÍVKA NEBO E-MAIL", fill=t["muted"], font=self.font(8, True), tags=("lg_login",))
+        c.create_text(944, 440, anchor="w", text="HESLO", fill=t["muted"], font=self.font(8, True), tags=("lg_login",))
+        c.create_text(1236, 440, anchor="e", text="ukázat", fill=t["accent"], font=self.font(8, True), tags=("lg_login", "lg_show"))
         c.tag_bind("lg_show", "<Button-1>", lambda e: self.e_pw.configure(show="" if self.e_pw.cget("show") else "•"))
         c.tag_bind("lg_show", "<Enter>", lambda e: c.configure(cursor="hand2"))
         c.tag_bind("lg_show", "<Leave>", lambda e: c.configure(cursor=""))
-        self.chk_box = c.create_rectangle(896, 232, 910, 246, outline=t["accent"], fill="", tags=("lg_login", "lg_chk"))
-        self.chk_mark = c.create_text(903, 239, text="✓", fill="#ffffff", font=self.font(9, True), tags=("lg_login", "lg_chk"))
-        c.create_text(918, 239, anchor="w", text="Zapamatovat heslo na tomto počítači", fill=t["text"], font=self.font(9), tags=("lg_login", "lg_chk"))
+        self.chk_box = c.create_rectangle(944, 490, 958, 504, outline=t["accent"], fill="", tags=("lg_login", "lg_chk"))
+        self.chk_mark = c.create_text(951, 497, text="✓", fill="#ffffff", font=self.font(9, True), tags=("lg_login", "lg_chk"))
+        c.create_text(966, 497, anchor="w", text="Zapamatovat heslo na tomto počítači", fill=t["text"], font=self.font(9), tags=("lg_login", "lg_chk"))
         c.tag_bind("lg_chk", "<Button-1>", lambda e: self.set_remember(not self.remember))
         c.tag_bind("lg_chk", "<Enter>", lambda e: c.configure(cursor="hand2"))
         c.tag_bind("lg_chk", "<Leave>", lambda e: c.configure(cursor=""))
-        for x, label, key, tag in ((896, "Zapomenuté heslo", "forgot", "lg_forgot"), (1030, "Založit účet na webu", "register", "lg_reg")):
-            c.create_text(x, 272, anchor="w", text=label, fill=t["accent"], font=self.font(9), tags=("lg_login", tag))
+        for x, label, key, tag in ((944, "Zapomenuté heslo", "forgot", "lg_forgot"), (1078, "Založit účet na webu", "register", "lg_reg")):
+            c.create_text(x, 523, anchor="w", text=label, fill=t["accent"], font=self.font(9), tags=("lg_login", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, k=key: self.open(self.link(k)))
             c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
@@ -1089,23 +1207,29 @@ class App(tk.Tk):
         c.delete("lg_saved")
         slots = [(i, a) for i, a in enumerate(self.store.slots) if a]
         for row, (i, a) in enumerate(slots):
-            y = 112 + row * 30
+            y = 402 + row * 25
             on = i == self.sel_slot
             tg = "lg_saved"
-            c.create_rectangle(896, y - 13, 1224, y + 13, fill=t["rail_on"] if on else "", outline=t["accent"] if on else t["border"], tags=(tg, "acc%d" % i))
-            c.create_rectangle(902, y - 8, 918, y + 8, fill=t["accent"], outline="", tags=(tg, "acc%d" % i))
-            c.create_text(910, y, text=(a[0][:1] or "?").upper(), fill=t.get("play_text", "#ffffff"), font=self.font(9, True), tags=(tg, "acc%d" % i))
-            c.create_text(928, y, anchor="w", text=clip(a[0], 24), fill="#ffffff" if on else t["text"], font=self.font(10, True), tags=(tg, "acc%d" % i))
-            c.create_text(1212, y, text="×", fill=t["bad"], font=self.font(13, True), tags=(tg, "del%d" % i))
+            c.create_rectangle(944, y - 11, 1236, y + 11, fill=t["rail_on"] if on else t["field"], outline=t["accent"] if on else t["border"], tags=(tg, "acc%d" % i))
+            c.create_rectangle(950, y - 7, 964, y + 7, fill=t["accent"], outline="", tags=(tg, "acc%d" % i))
+            c.create_text(957, y, text=(a[0][:1] or "?").upper(), fill=t.get("play_text", "#ffffff"), font=self.font(8, True), tags=(tg, "acc%d" % i))
+            c.create_text(974, y, anchor="w", text=clip(a[0], 26), fill="#ffffff" if on else t["text"], font=self.font(10, True), tags=(tg, "acc%d" % i))
+            c.create_text(1224, y, text="×", fill=t["bad"], font=self.font(13, True), tags=(tg, "del%d" % i))
             c.tag_bind("acc%d" % i, "<Button-1>", lambda e, k=i: self.pick_account(k))
             c.tag_bind("del%d" % i, "<Button-1>", lambda e, k=i: self.delete_account(k))
             for tg2 in ("acc%d" % i, "del%d" % i):
                 c.tag_bind(tg2, "<Enter>", lambda e: c.configure(cursor="hand2"))
                 c.tag_bind(tg2, "<Leave>", lambda e: c.configure(cursor=""))
-        c.create_text(896, 290, anchor="w", text="+  Přidat další účet", fill=t["accent"], font=self.font(9, True), tags=("lg_saved", "lg_add"))
+        c.create_text(944, 402 + len(slots) * 25 + 8, anchor="w", text="+  Přidat další účet", fill=t["accent"], font=self.font(9, True), tags=("lg_saved", "lg_add"))
         c.tag_bind("lg_add", "<Button-1>", lambda e: self.toggle_mode())
         c.tag_bind("lg_add", "<Enter>", lambda e: c.configure(cursor="hand2"))
         c.tag_bind("lg_add", "<Leave>", lambda e: c.configure(cursor=""))
+        self.keep_under_page("lg_saved")
+
+    def keep_under_page(self, tag):
+        """Položky, které se kreslí znovu za běhu, nesmí skončit nad stránkou novinek."""
+        if getattr(self, "bg_page", None):
+            self.c.tag_lower(tag, self.bg_page)
 
     def pick_account(self, i):
         self.sel_slot = i
@@ -1126,7 +1250,6 @@ class App(tk.Tk):
     # --- kanály
     def build_channels(self):
         c, t = self.c, self.t
-        c.create_text(896, 323, anchor="w", text="KANÁL", fill=t["accent2"], font=self.font(10, True))
         self.draw_channels()
 
     def draw_channels(self):
@@ -1134,7 +1257,7 @@ class App(tk.Tk):
         c.delete("chn")
         n = self.n_channels
         self.channel = min(self.channel, n - 1)
-        gap, wtot = 8, 328
+        gap, wtot = 8, 292
         w = (wtot - gap * (n - 1)) / n
         api = getattr(self, "api", {})
         up = bool(api.get("server_online", True)) if isinstance(api, dict) else True
@@ -1143,17 +1266,18 @@ class App(tk.Tk):
         if not self.ch_up[self.channel] and any(self.ch_up):
             self.channel = self.ch_up.index(True)
         for i in range(n):
-            x = 896 + i * (w + gap)
+            x = 944 + i * (w + gap)
             on = i == self.channel
             cup = self.ch_up[i]
             tg = "ch%d" % i
-            c.create_rectangle(x, 338, x + w, 378, fill=t["rail_on"] if on else t["field"], outline=t["accent"] if on else t["border"], tags=("chn", tg))
-            c.create_text(x + w / 2, 351, text="CH%d" % (i + 1), fill="#ffffff" if on else (t["text"] if cup else t["muted"]), font=self.font(10, True), tags=("chn", tg))
-            c.create_text(x + w / 2, 367, text="Volno" if cup else "Offline", fill=t["ok"] if cup else t["bad"], font=self.font(8), tags=("chn", tg))
+            c.create_polygon(self.skew_poly(x, 556, x + w, 594, 4, 11), fill=t["rail_on"] if on else t["field"], outline=t["accent"] if on else t["border"], width=2 if on else 1, tags=("chn", tg))
+            c.create_text(x + w / 2, 569, text="CH%d" % (i + 1), fill="#ffffff" if on else (t["text"] if cup else t["muted"]), font=self.font(10, True), tags=("chn", tg))
+            c.create_text(x + w / 2, 584, text="Volno" if cup else "Offline", fill=t["ok"] if cup else t["bad"], font=self.font(8), tags=("chn", tg))
             c.tag_bind(tg, "<Button-1>", lambda e, k=i: self.pick_channel(k))
             c.tag_bind(tg, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tg, "<Leave>", lambda e: c.configure(cursor=""))
         c.tag_raise("note")
+        self.keep_under_page("chn")
 
     def pick_channel(self, i):
         if not getattr(self, "ch_up", [True] * 8)[i]:
@@ -1168,12 +1292,13 @@ class App(tk.Tk):
     # --- tlačítko Hrát a zpráva pod ním
     def build_play(self):
         c, t = self.c, self.t
-        c.create_rectangle(880, 398, 1240, 448, fill=t["accent"], outline=t["accent2"], tags=("play", "play_bg"))
-        self.play_txt = c.create_text(1060, 423, text="PŘIHLÁSIT A HRÁT", fill=t.get("play_text", "#ffffff"), font=self.font(15, True), tags=("play",))
-        self.play_cap = c.create_text(1060, 463, text="", fill=t["muted"], font=self.font(9), width=350, justify="center")
+        fill, hov = t.get("play_fill", "#7b2fe0"), t.get("play_hover", "#9a52ff")
+        c.create_polygon(self.skew_poly(944, 604, 1236, 654, 6, 22), fill=fill, outline=t["gold"], width=2, tags=("play", "play_bg"))
+        self.play_txt = c.create_text(1090, 629, text="PŘIHLÁSIT A HRÁT", fill="#ffffff", font=self.font(15, True), tags=("play",))
+        self.play_cap = c.create_text(1090, 676, text="", fill=t["muted"], font=self.font(9), width=300, justify="center")
         c.tag_bind("play", "<Button-1>", lambda e: self.on_play())
-        c.tag_bind("play", "<Enter>", lambda e: (c.configure(cursor="hand2"), c.itemconfigure("play_bg", fill="#7ff5dc")))
-        c.tag_bind("play", "<Leave>", lambda e: (c.configure(cursor=""), c.itemconfigure("play_bg", fill=t["accent"])))
+        c.tag_bind("play", "<Enter>", lambda e: (c.configure(cursor="hand2"), c.itemconfigure("play_bg", fill=hov)))
+        c.tag_bind("play", "<Leave>", lambda e: (c.configure(cursor=""), c.itemconfigure("play_bg", fill=fill)))
         self.update_caption()
 
     def say(self, text, kind="info"):
@@ -1189,11 +1314,12 @@ class App(tk.Tk):
         self.c.itemconfigure(self.play_txt, text="HRÁT" if who else "PŘIHLÁSIT A HRÁT")
         self.say("%sCH%d  ·  přihlášení přes launcher" % (who, self.channel + 1))
 
-    # --- pravý spodní panel: žebříček (hráči / cechy), listuje se kolečkem myši nebo šipkami
-    TOP_ROWS = 7
+    # --- žebříček (hráči / cechy) na stránce, listuje se kolečkem myši nebo šipkami
+    TOP_ROWS = 15
 
     def build_side(self):
         c, t = self.c, self.t
+        rx0, ry0, rx1, ry1 = self.RANK
         # stav serveru je vidět u kanálů a v kartách, tyto položky zůstávají jen skryté kvůli zbytku kódu
         self.dot = c.create_oval(0, 0, 1, 1, state="hidden")
         self.state_id = c.create_text(0, 0, text="", state="hidden")
@@ -1201,48 +1327,56 @@ class App(tk.Tk):
         self.top_tab, self.top_off = "players", 0
         self.top_data = {"players": [], "guilds": []}
         self.top_tabs = {}
-        for key, label, x in (("players", "HRÁČI", 896), ("guilds", "CECHY", 968)):
+        for key, label, x in (("players", "HRÁČI", rx0 + 18), ("guilds", "CECHY", rx0 + 90)):
             tg = "toptab_" + key
-            it = c.create_text(x, 491, anchor="w", text=label, fill=t["muted"], font=self.font(10, True), tags=(tg,))
-            bb = c.bbox(it) or (x, 484, x + 50, 498)
-            ul = c.create_line(bb[0], 502, bb[2], 502, fill=t["accent"], width=2, state="hidden")
+            it = c.create_text(x, ry0 + 19, anchor="w", text=label, fill=t["muted"], font=self.font(10, True), tags=(tg,))
+            bb = c.bbox(it) or (x, ry0 + 12, x + 50, ry0 + 26)
+            ul = c.create_line(bb[0], ry0 + 32, bb[2], ry0 + 32, fill=t["accent"], width=2, state="hidden")
             self.top_tabs[key] = (it, ul)
             c.tag_bind(tg, "<Button-1>", lambda e, k=key: self.set_top_tab(k))
             c.tag_bind(tg, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tg, "<Leave>", lambda e: c.configure(cursor=""))
-        self.top_cnt = c.create_text(1180, 491, anchor="e", text="", fill=t["muted"], font=self.font(8, True))
-        self.top_up = c.create_text(1198, 491, text="▲", fill=t["accent"], font=self.font(8, True), state="hidden", tags=("top_up",))
-        self.top_dn = c.create_text(1218, 491, text="▼", fill=t["accent"], font=self.font(8, True), state="hidden", tags=("top_dn",))
+        self.top_cnt = c.create_text(rx1 - 48, ry0 + 19, anchor="e", text="", fill=t["muted"], font=self.font(8, True))
+        self.top_up = c.create_text(rx1 - 32, ry0 + 19, text="▲", fill=t["accent"], font=self.font(8, True), state="hidden", tags=("top_up",))
+        self.top_dn = c.create_text(rx1 - 14, ry0 + 19, text="▼", fill=t["accent"], font=self.font(8, True), state="hidden", tags=("top_dn",))
         for tg, step in (("top_up", -1), ("top_dn", 1)):
             c.tag_bind(tg, "<Button-1>", lambda e, k=step: self.top_scroll(k))
             c.tag_bind(tg, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tg, "<Leave>", lambda e: c.configure(cursor=""))
         self.top_rows = []
         for i in range(self.TOP_ROWS):
-            y = 526 + i * 24
-            rk = c.create_text(900, y, anchor="w", text="", fill=t["accent"], font=self.font(9, True), state="hidden", tags=("top_click",))
-            nm = c.create_text(932, y, anchor="w", text="", fill="#ffffff", font=self.font(10), state="hidden", tags=("top_click",))
-            lv = c.create_text(1224, y, anchor="e", text="", fill=t["accent2"], font=self.font(9, True), state="hidden", tags=("top_click",))
+            y = ry0 + 62 + i * 28
+            rk = c.create_text(rx0 + 18, y, anchor="w", text="", fill=t["accent"], font=self.font(9, True), state="hidden", tags=("top_click",))
+            nm = c.create_text(rx0 + 52, y, anchor="w", text="", fill="#ffffff", font=self.font(10), state="hidden", tags=("top_click",))
+            lv = c.create_text(rx1 - 16, y, anchor="e", text="", fill=t["accent2"], font=self.font(9, True), state="hidden", tags=("top_click",))
             self.top_rows.append((rk, nm, lv))
-        self.top_empty = c.create_text(896, 522, anchor="nw", width=320, text="Načítám žebříček…", fill=t["muted"], font=self.font(9))
+        self.top_empty = c.create_text(rx0 + 16, ry0 + 52, anchor="nw", width=320, text="Načítám žebříček…", fill=t["muted"], font=self.font(9))
         c.tag_bind("top_click", "<Button-1>", lambda e: self.open(self.link("ranking") or self.link("web")))
         c.tag_bind("top_click", "<Enter>", lambda e: c.configure(cursor="hand2"))
         c.tag_bind("top_click", "<Leave>", lambda e: c.configure(cursor=""))
         self.set_top_tab("players")
 
-    # --- stahování
+    # --- stahování a aktuální novinka (dolní panel uprostřed)
     def build_progress(self):
         c, t = self.c, self.t
-        self.status_id = c.create_text(96, 590, anchor="w", text="", fill="#ffffff", font=self.font(11, True))
+        x0, x1 = self.BAR_X0, self.BAR_X1
+        self.status_id = c.create_text(392, 520, anchor="w", width=500, text="", fill="#ffffff", font=self.font(11, True))
+        self.tk_cat = c.create_text(392, 554, anchor="w", text="NOVINKY", fill=t["accent"], font=self.font(8, True))
+        self.tk_title = c.create_text(392, 574, anchor="w", width=380, text="Načítám novinky…", fill="#ffffff", font=self.font(11, True), tags=("tk_click",))
+        self.tk_more = c.create_text(888, 574, anchor="e", text="VŠE  ▸", fill=t["accent"], font=self.font(9, True), tags=("tk_more",))
+        for tg in ("tk_click",):
+            c.tag_bind(tg, "<Button-1>", lambda e: self.open_news(self.hero_i))
+        c.tag_bind("tk_more", "<Button-1>", lambda e: self.open_page())
+        for tg in ("tk_click", "tk_more"):
+            c.tag_bind(tg, "<Enter>", lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tg, "<Leave>", lambda e: c.configure(cursor=""))
         self.bars = []
-        for y, label in ((610, "Soubor"), (636, "Celkem")):
-            c.create_text(98, y + 6, anchor="w", text=label, fill=t["muted"], font=self.font(8, True))
-            self.bars.append(c.create_rectangle(151, y + 1, 151, y + 11, outline="", fill=t["accent"] if y == 636 else t["bar_file"]))
-        c.create_text(96, 706, anchor="w", text="© Violet2  ·  v%s  ·  licence" % VERSION, fill=t["muted"], font=self.font(8), tags=("about",))
+        for (bx0, by0, bx1, by1), label, col in zip(((x0, 599, x1, 609), (x0, 625, x1, 635)), ("Soubor", "Celkem"), (t["bar_file"], t["accent"])):
+            c.create_text(392, (by0 + by1) / 2, anchor="w", text=label, fill=t["muted"], font=self.font(8, True))
+            self.bars.append(c.create_rectangle(bx0 + 1, by0, bx0 + 1, by1, outline="", fill=col))
+        c.create_text(392, 678, anchor="w", text="© Violet2  ·  v%s  ·  licence" % VERSION, fill=t["muted"], font=self.font(8), tags=("about",))
         self.hot("about", self.about)
-        for name, x, key in (("check", 860, None),):
-            pass
-        c.create_text(856, 706, anchor="e", text="Zkontrolovat soubory hry", fill=t["accent"], font=self.font(8, True), tags=("check_btn",))
+        c.create_text(888, 678, anchor="e", text="Zkontrolovat soubory hry", fill=t["accent"], font=self.font(8, True), tags=("check_btn",))
         c.tag_bind("check_btn", "<Button-1>", lambda e: self.start_patch())
         c.tag_bind("check_btn", "<Enter>", lambda e: c.configure(cursor="hand2"))
         c.tag_bind("check_btn", "<Leave>", lambda e: c.configure(cursor=""))
@@ -1282,8 +1416,14 @@ class App(tk.Tk):
         c.delete("set")
         self._wheel = []
         txt, ttl, acc, mut = t["panel_text"], t["panel_title"], t["accent"], t["muted"]
-        c.create_rectangle(0, 58, self.W, self.H, fill="#000000", stipple="gray50", outline="", tags=("set",))
-        self.rrect(250, 96, 1030, 626, 22, fill=t["note_bg"], outline=t["bar_outline"], width=3, tags=("set",))
+        if not hasattr(self, "set_bg_img"):
+            self.set_bg_img = self.img("assets/bg_set.png")
+        if self.set_bg_img:  # celé okno překryje jen ztmavená ilustrace, aby byl vidět pouze dialog
+            c.create_image(0, 0, anchor="nw", image=self.set_bg_img, tags=("set",))
+        else:
+            c.create_rectangle(0, 0, self.W, self.H, fill=t["bg"], outline="", tags=("set",))
+        c.create_polygon(self.cut_poly(250, 96, 1030, 626, 26), fill=t["note_bg"], outline=t["accent"], width=2, tags=("set",))
+        c.create_polygon(self.cut_poly(258, 104, 1022, 618, 22), fill="", outline=t["bar_outline"], width=1, tags=("set",))
         c.create_text(640, 128, text="NASTAVENÍ HRY", fill=ttl, font=self.font(15, True), tags=("set",))
         c.create_line(280, 152, 1000, 152, fill=t["bar_outline"], tags=("set",))
         for x, head, rows in ((280, "OBRAZ", (("res", "Rozlišení"), ("freq", "Frekvence"), ("gamma", "Gama"), ("windowed", "Režim"),
@@ -1300,17 +1440,20 @@ class App(tk.Tk):
                     self.draw_choice(key, x + 160, y)
         for cx, label, cmd, main in ((440, "Uložit", self.save_settings, True), (640, "Výchozí", self.default_settings, False), (840, "Zrušit", self.close_settings, False)):
             tag = "set_btn_" + label
-            self.rrect(cx - 80, 560, cx + 80, 602, 20, fill=acc if main else t["bar_bg"], outline=t["bar_outline"], width=2, tags=("set", tag))
-            c.create_text(cx, 581, text=label, fill="#06142a" if main else txt, font=self.font(12, True), tags=("set", tag))
+            c.create_polygon(self.cut_poly(cx - 80, 560, cx + 80, 602, 12), fill=acc if main else t["bar_bg"], outline=t["accent"] if not main else t["gold"], width=2, tags=("set", tag))
+            c.create_text(cx, 581, text=label, fill="#ffffff" if main else txt, font=self.font(12, True), tags=("set", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, f=cmd: f())
             c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
         c.create_text(640, 612, text="Nastavení se ukládá do config/metin2.cfg a aktualizace ho nepřepíše.", fill=mut, font=self.font(9), tags=("set",))
+        for tg in ("btn_min", "btn_close", "btn_mus", "btn_vup", "btn_vdn"):
+            c.tag_raise(tg)
+        c.tag_raise(self.vol_id)
 
     def draw_choice(self, key, x, y):
         c, m, txt, acc = self.c, self.set_model, self.t["panel_text"], self.t["accent"]
         tag = "set_c_" + key
-        self.rrect(x, y - 17, x + 180, y + 17, 12, fill=self.t["bar_bg"], outline=self.t["bar_outline"], tags=("set", tag))
+        c.create_polygon(self.cut_poly(x, y - 17, x + 180, y + 17, 8), fill=self.t["bar_bg"], outline=self.t["bar_outline"], tags=("set", tag))
         c.create_text(x + 90, y, text=m.label(key), fill=txt, font=self.font(11, True), tags=("set", tag))
         for dx, ch, d in ((14, "\u2039", -1), (166, "\u203a", 1)):
             at = "%s_%d" % (tag, d)
@@ -1337,10 +1480,13 @@ class App(tk.Tk):
 
     def on_wheel(self, e):
         if not getattr(self, "_set_open", False):
+            if not self.pg_open:
+                return
             cx0, cy0, cx1, cy1 = self.CARDS[0]
+            rx0, ry0, rx1, ry1 = self.RANK
             if cx0 <= e.x <= cx1 and cy0 <= e.y <= cy1:
                 self.gm_scroll(-1 if e.delta > 0 else 1)
-            elif 880 <= e.x <= 1240 and 476 <= e.y <= 696:
+            elif rx0 <= e.x <= rx1 and ry0 <= e.y <= ry1:
                 self.top_scroll(-1 if e.delta > 0 else 1)
             return
         for x1, y1, x2, y2, key in getattr(self, "_wheel", []):
@@ -1827,7 +1973,7 @@ class App(tk.Tk):
             c.itemconfigure(it, state="normal" if more else "hidden")
         on_n = sum(1 for g in self.gm_all if g.get("online"))
         c.itemconfigure(self.gm_cnt, text="%d online" % on_n if n else "")
-        c.coords(self.gm_cnt, self.CARDS[0][0] + (190 if more else 224), self.CARDS[0][1] + 18)
+        c.coords(self.gm_cnt, self.CARDS[0][0] + (190 if more else 224), self.CARDS[0][1] + 18 + self.pg_dy)
 
     def hero_loop(self):
         self.hero_tick += 1
@@ -1855,8 +2001,8 @@ class App(tk.Tk):
         def apply():
             c = self.c
             c.itemconfigure(self.status_id, text=text + ("   ·   %d %%" % t if 0 < t < 100 else ""))
-            c.coords(self.bars[0], 151, 611, 151 + 704 * f / 100, 621)
-            c.coords(self.bars[1], 151, 637, 151 + 704 * t / 100, 647)
+            c.coords(self.bars[0], self.BAR_X0 + 1, 599, self.BAR_X0 + 1 + (self.BAR_X1 - self.BAR_X0 - 2) * f / 100, 609)
+            c.coords(self.bars[1], self.BAR_X0 + 1, 625, self.BAR_X0 + 1 + (self.BAR_X1 - self.BAR_X0 - 2) * t / 100, 635)
         self.ui(apply)
 
     def start_patch(self):
@@ -1888,7 +2034,7 @@ class App(tk.Tk):
     def entries_visible(self, vis):
         """Pole pro přihlášení jsou skutečné prvky okna, a ty by zůstaly nad okénky (nastavení, zprávy). Proto se schovávají."""
         try:
-            state = "normal" if (vis and self.mode == "login") else "hidden"
+            state = "normal" if (vis and self.mode == "login" and not self.pg_open) else "hidden"
             self.c.itemconfigure(self.w_id, state=state)
             self.c.itemconfigure(self.w_pw, state=state)
         except Exception:
@@ -2005,7 +2151,7 @@ class App(tk.Tk):
         c.tag_bind("note", "<Button-1>", lambda e: (c.delete("note"), self.entries_visible(not getattr(self, "_set_open", False))))
 
     def about(self):
-        self.notify("Violet2 Launcher %s\n\n\u00a9 Violet2. Kód je open source (MIT). Název Violet2, logo a grafika jsou majetkem provozovatele serveru.\nPatche jsou digitálně podepsané a launcher neobsahuje IP adresu serveru ani hesla." % VERSION)
+        self.notify("Violet2 Launcher %s\n\n\u00a9 Violet2. Všechna práva vyhrazena. Proprietární software: kopírování, úpravy a šíření bez písemného souhlasu provozovatele jsou zakázány. Název Violet2, logo a grafika jsou majetkem provozovatele.\n\nZabezpečení: šifrované spojení (HTTPS) jen s ověřeným serverem, digitálně podepsané patche, ochrana proti zahlcení (anti-DDoS) omezováním počtu dotazů v launcheru i na serveru. Launcher neobsahuje IP adresu serveru ani hesla." % VERSION)
 
 
 if __name__ == "__main__":
