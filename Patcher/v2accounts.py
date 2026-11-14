@@ -264,7 +264,8 @@ def write_autologin(path, login, password, channel):
     import time
     if not valid_text(login, MAX_LOGIN) or not valid_text(password, MAX_PASS):
         return "Neplatny login nebo heslo"
-    body = "V2AL1\n%d\n%d\n%s\n" % (int(time.time()), int(channel), protect(_b(login + "\n" + password)))
+    # Predani je kratkodobe (120 s) a klient ho hned smaze. Klient nema _ctypes, proto se nepouziva DPAPI, ale zaloha X1.
+    body = "V2AL1\n%d\n%d\nX1:%s\n" % (int(time.time()), int(channel), _s(_x1_protect(_b(login + "\n" + password))))
     d = os.path.dirname(path)
     if d and not os.path.isdir(d):
         os.makedirs(d)

@@ -35,7 +35,7 @@ try:  # volitelné: s Pillow launcher ukáže fotky novinek z webu, bez něj pou
 except Exception:  # noqa: BLE001
     Image = None
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 BASE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
 # Vlastní data launcheru (stav, hudba, logy) NEJSOU ve složce hry, ale v %APPDATA%\\Violet2Launcher
 DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Violet2Launcher")
